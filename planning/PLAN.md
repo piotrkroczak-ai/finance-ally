@@ -454,3 +454,52 @@ The container is designed to deploy to AWS App Runner, Render, or any container 
 - Portfolio visualization: heatmap renders with correct colors, P&L chart has data points
 - AI chat (mocked): send a message, receive a response, trade execution appears inline
 - SSE resilience: disconnect and verify reconnection
+
+---
+
+## 13. Review Notes — Questions, Clarifications & Simplification Opportunities
+
+### Questions & Clarifications
+
+**1. Lazy DB init: startup or first request?**
+Section 7 says "The backend checks for the SQLite database on startup (or first request)." These are different: if it's first-request, simultaneous cold-start requests could race on schema creation. Recommend changing to startup-only (lifespan event in FastAPI) and removing the ambiguity.
+
+**2. SSE stream and dynamic watchlist changes**
+Section 6 says the SSE stream pushes updates for "all tickers known to the system." What happens when the user adds a ticker mid-session? Does the server automatically include the new ticker in subsequent SSE pushes, or must the client reconnect? This needs a concrete answer so the frontend and backend agents agree on the contract.
+
+**3. "Daily change %" with the simulator**
+The watchlist panel is specified to show "daily change %", but the simulator has no concept of yesterday's close — it starts prices fresh each session. Should this column show change-since-session-start instead? Or be omitted in simulator mode and only shown when using the Massive API?
+
+**4. Chat history limit**
+Section 9 says the backend loads "recent conversation history" but gives no limit. Without a cap, a long chat session will eventually overflow the LLM's context window. Specify a concrete limit (e.g., last 20 message pairs) so both the backend implementation and tests are consistent.
+
+**5. Trading a ticker not on the watchlist**
+The trade bar has a free-text ticker field. Can the user buy a ticker that isn't in their watchlist? If yes, should the trade auto-add it to the watchlist? If no, should the UI constrain the ticker field to watchlist members? The plan is silent on this.
+
+**6. `portfolio_snapshots` total value formula**
+The plan says snapshots record `total_value` every 30 seconds, but never defines the formula. Confirm it is: `cash_balance + Σ(quantity × current_price)` for all open positions. Also clarify: if a position's current price is not in the price cache yet (e.g., fresh restart), should the snapshot be skipped or use avg_cost as a fallback?
+
+**7. Sparkline data lost on SSE reconnect**
+Sparklines are accumulated from SSE events since page load. EventSource auto-reconnects, but the accumulated history is held in frontend memory — a network blip resets it. Is this acceptable, or should sparkline history survive reconnects (e.g., by replaying recent prices from a `/api/prices/history/{ticker}` endpoint)?
+
+**8. `cerebras-inference` skill reference in Section 9**
+Section 9 tells agents to "use the cerebras-inference skill" but this is a Claude Code skill, not Python code. Agents need to know what the resulting Python code should look like (which LiteLLM model string, which headers, structured output approach). Either include a minimal code snippet here or link to a separate `LLM_INTEGRATION.md` reference doc.
+
+---
+
+### Opportunities to Simplify
+
+**A. UUID primary keys on internal tables**
+`watchlist`, `positions`, `portfolio_snapshots`, and `trades` all use UUID primary keys, but none of these IDs are exposed in the API (the watchlist DELETE uses the ticker name; portfolio uses ticker; history is a list). Consider `INTEGER PRIMARY KEY AUTOINCREMENT` for `portfolio_snapshots` and `trades` (purely internal, append-only) to reduce boilerplate. Keep UUIDs only on `users_profile` and `chat_messages` where external references are plausible.
+
+**B. `backend/db/` naming**
+The subdirectory `backend/db/` holds schema SQL, while the top-level `db/` holds the runtime SQLite file. This is a confusing name collision. Renaming `backend/db/` to `backend/schema/` or `backend/sql/` would eliminate the ambiguity.
+
+**C. Frontend test framework is unspecified**
+"React Testing Library or similar" leaves the choice open, which risks agents making incompatible choices. Next.js projects work well with Vitest + Testing Library — specify this explicitly to ensure consistency.
+
+**D. Raw `docker run` in Section 11**
+The Docker Volume section shows a raw `docker run` command, but users are expected to use the start scripts. The raw command may confuse users into running it directly and getting inconsistent container names. Either remove it or clearly label it as "what the script does internally."
+
+**E. `users_profile` table name**
+The table is named `users_profile` (plural noun + singular noun). Conventional SQL naming would be `user_profile` (singular) or `users` (plural). This is minor but will appear in every query — pick one convention and apply it consistently across all table names.
