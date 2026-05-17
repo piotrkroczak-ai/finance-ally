@@ -119,22 +119,28 @@ finally/
 ## 5. Environment Variables
 
 ```bash
-# Required: OpenRouter API key for LLM chat functionality
+# Required unless LLM_MOCK=true: OpenRouter API key for LLM chat functionality
 OPENROUTER_API_KEY=your-openrouter-api-key-here
 
 # Optional: Massive (Polygon.io) API key for real market data
 # If not set, the built-in market simulator is used (recommended for most users)
 MASSIVE_API_KEY=
 
-# Optional: Set to "true" for deterministic mock LLM responses (testing)
+# Optional: Set to "true" for deterministic mock LLM responses (testing, no API key needed)
 LLM_MOCK=false
+
+# Optional: Path to the built frontend static files served by FastAPI
+# Default: ../frontend/out/ (relative to backend/). In Docker: /app/static/
+STATIC_FILES_DIR=../frontend/out/
 ```
 
 ### Behavior
 
 - If `MASSIVE_API_KEY` is set and non-empty → backend uses Massive REST API for market data
 - If `MASSIVE_API_KEY` is absent or empty → backend uses the built-in market simulator
-- If `LLM_MOCK=true` → backend returns deterministic mock LLM responses (for E2E tests)
+- If `LLM_MOCK=true` → backend returns deterministic mock LLM responses (for E2E tests). `OPENROUTER_API_KEY` is NOT required in this mode.
+- If `LLM_MOCK=false` (default) → `OPENROUTER_API_KEY` MUST be set, otherwise startup fails with a clear error
+- `STATIC_FILES_DIR` controls where FastAPI serves the built frontend from. Backend reads it at startup; missing directory logs a warning but does not block API serving.
 - The backend reads `.env` from the project root at startup
 
 ---
@@ -173,21 +179,34 @@ Both the simulator and the Massive client implement the same abstract interface.
 
 - Endpoint: `GET /api/stream/prices`
 - Long-lived SSE connection; client uses native `EventSource` API
-- Server pushes price updates for all tickers known to the system at a regular cadence (~500ms) — in the single-user model this is equivalent to the user's watchlist
+- Server pushes price updates for all tickers currently in the user's watchlist at a regular cadence (~500ms)
+- **Dynamic watchlist tracking**: the server holds the SSE connection open across watchlist changes. When the user adds a ticker via `POST /api/watchlist`, the SSE loop picks it up on the next tick — no client reconnect needed. When a ticker is removed, the server stops emitting events for it.
 - Each SSE event contains ticker, price, previous price, session open price, timestamp, and change direction
-- Client handles reconnection automatically (EventSource has built-in retry)
+- Client handles transport reconnection automatically (EventSource has built-in retry); see §13 Q7 for the trade-off on sparkline history loss across reconnects
 
 ---
 
 ## 7. Database
 
-### SQLite with Lazy Initialization
+### SQLite Initialization at Startup
 
-The backend checks for the SQLite database on startup (or first request). If the file doesn't exist or tables are missing, it creates the schema and seeds default data. This means:
+The backend checks for the SQLite database during the FastAPI **lifespan startup** event (before any request is accepted). If the file doesn't exist or tables are missing, it creates the schema and seeds default data. This means:
 
 - No separate migration step
 - No manual database setup
+- No race condition: init runs exactly once, before the first request is served
 - A fresh or missing `db/finally.db` file results in a clean, seeded database automatically
+- `init_db()` is idempotent: running it on an already-initialised database is a no-op
+
+### Ticker Normalization
+
+All ticker values entering the system (from API requests, LLM-generated trades, or watchlist changes) are normalized before validation and storage:
+
+1. `trim()` — strip surrounding whitespace
+2. `upper()` — uppercase the result
+3. Validate against regex `^[A-Z]{1,5}$` — reject otherwise with HTTP 400
+
+This applies to: `POST /api/watchlist`, `POST /api/portfolio/trade`, LLM-emitted `trades[]` and `watchlist_changes[]`. The seed tickers (AAPL, GOOGL, MSFT, AMZN, TSLA, NVDA, META, JPM, V, NFLX) all satisfy this rule. Tickers with dots (e.g., `BRK.B`) are out of scope for the current spec and will require a regex extension when added.
 
 ### Schema
 
@@ -223,11 +242,33 @@ All tables include a `user_id` column defaulting to `"default"`. This is hardcod
 - `price` REAL
 - `executed_at` TEXT (ISO timestamp)
 
-**portfolio_snapshots** — Portfolio value over time (for P&L chart). Recorded every 30 seconds by a background task, and immediately after each trade execution.
+**portfolio_snapshots** — Portfolio value over time (for P&L chart). Recorded every 30 seconds by a background task, immediately after each trade execution, and once at startup as soon as the price cache contains at least one tick (to avoid a 30-second empty-chart gap on a fresh launch).
 - `id` INTEGER PRIMARY KEY AUTOINCREMENT
 - `user_id` TEXT (default: `"default"`)
 - `total_value` REAL
 - `recorded_at` TEXT (ISO timestamp)
+
+**`total_value` formula**:
+
+```
+total_value = cash_balance + Σ (position.quantity × current_price(ticker))
+```
+
+`current_price(ticker)` resolution order:
+1. Live price from the in-memory `PriceCache` (set by the market data source)
+2. If the cache has no entry for that ticker yet (e.g., very first seconds after startup, before the first tick), fall back to the **seed price** defined in `backend/app/market/seed_prices.py`
+3. Never use `avg_cost` as a fallback — it would conflate "what I paid" with "what it's worth"
+
+This fallback rule is acceptable in simulator mode (seed = simulator starting point, drift is tiny in the first second). In Massive mode, the first snapshot may briefly be inaccurate before live prices arrive; this self-corrects on the next 30-second cycle.
+
+**daily_closes** — Snapshot of the last known prices, used to compute the "daily change %" column in the watchlist UI. Overwritten on every backend shutdown (one row per ticker).
+- `ticker` TEXT PRIMARY KEY
+- `close_price` REAL
+- `closed_at` TEXT (ISO timestamp)
+
+**Write behavior**: a FastAPI lifespan shutdown hook reads the current price cache and `INSERT OR REPLACE`s one row per watchlist ticker. No periodic write — a process crash means the next session uses the previous successful shutdown's data, which is acceptable for a single-user portfolio app.
+
+**Read behavior**: on the very first launch (table empty), the watchlist UI shows `N/A` in the "daily change %" column. From the second session onward, change is computed as `(current_price - close_price) / close_price`.
 
 **chat_messages** — Conversation history with LLM
 - `id` TEXT PRIMARY KEY (UUID)
@@ -246,34 +287,127 @@ All tables include a `user_id` column defaulting to `"default"`. This is hardcod
 
 ## 8. API Endpoints
 
+All endpoints return JSON and use standard HTTP status codes. Validation errors return `400` with `{"detail": "..."}`. Server errors return `500`.
+
 ### Market Data
 | Method | Path | Description |
 |--------|------|-------------|
 | GET | `/api/stream/prices` | SSE stream of live price updates |
 
+**SSE event payload** (one event per ticker tick):
+
+```
+event: price
+data: {"ticker":"AAPL","price":195.42,"previous_price":195.31,"session_open":194.80,"timestamp":"2026-05-17T14:23:51.220Z","direction":"up"}
+```
+
 ### Portfolio
 | Method | Path | Description |
 |--------|------|-------------|
 | GET | `/api/portfolio` | Current positions, cash balance, total value, unrealized P&L |
-| POST | `/api/portfolio/trade` | Execute a trade: `{ticker, quantity, side}` |
+| POST | `/api/portfolio/trade` | Execute a trade |
 | GET | `/api/portfolio/history` | Portfolio value snapshots over time (for P&L chart) |
+
+**`GET /api/portfolio` response**:
+
+```json
+{
+  "cash_balance": 9234.50,
+  "total_value": 10520.75,
+  "positions": [
+    {"ticker": "AAPL", "quantity": 5, "avg_cost": 190.20, "current_price": 195.42, "market_value": 977.10, "unrealized_pnl": 26.10, "unrealized_pnl_pct": 2.74}
+  ]
+}
+```
+
+**`POST /api/portfolio/trade` request**:
+
+```json
+{"ticker": "AAPL", "quantity": 5, "side": "buy"}
+```
+
+**Rules**:
+- `ticker` is normalized (trim + upper + regex)
+- `ticker` MUST already exist in the user's watchlist; otherwise return `400 {"detail": "ticker not in watchlist"}`. No auto-add. The user must add the ticker to the watchlist before trading it.
+- `side` is `"buy"` or `"sell"`
+- `quantity` is a positive REAL (fractional shares allowed)
+- Buy: requires `cash_balance >= quantity × current_price`, otherwise `400`
+- Sell: requires `existing_quantity >= quantity`, otherwise `400`
+- On success: appends to `trades`, updates `positions` (and removes the row if quantity reaches 0), debits/credits `cash_balance`, writes a `portfolio_snapshots` row immediately
+
+**`POST /api/portfolio/trade` response** (200):
+
+```json
+{"trade_id": 42, "ticker": "AAPL", "side": "buy", "quantity": 5, "price": 195.42, "executed_at": "2026-05-17T14:23:51.220Z", "new_cash_balance": 8257.40}
+```
+
+**`GET /api/portfolio/history` response**:
+
+```json
+{"snapshots": [{"total_value": 10000.00, "recorded_at": "2026-05-17T14:00:00.000Z"}, {"total_value": 10125.50, "recorded_at": "2026-05-17T14:00:30.000Z"}]}
+```
 
 ### Watchlist
 | Method | Path | Description |
 |--------|------|-------------|
 | GET | `/api/watchlist` | Current watchlist tickers with latest prices |
-| POST | `/api/watchlist` | Add a ticker: `{ticker}` |
+| POST | `/api/watchlist` | Add a ticker |
 | DELETE | `/api/watchlist/{ticker}` | Remove a ticker |
+
+**`GET /api/watchlist` response**:
+
+```json
+{
+  "items": [
+    {"ticker": "AAPL", "current_price": 195.42, "session_open": 194.80, "daily_change_pct": 0.85, "previous_close": 193.78}
+  ]
+}
+```
+
+`daily_change_pct` is `null` (frontend displays "N/A") when no row exists in `daily_closes` for that ticker (first ever session).
+
+**`POST /api/watchlist` request / response**:
+
+```json
+// Request
+{"ticker": "PYPL"}
+
+// Response 200
+{"ticker": "PYPL", "added_at": "2026-05-17T14:23:51.220Z"}
+```
+
+Ticker is normalized. Duplicate (same `user_id + ticker`) returns `200` with the existing row (idempotent) — not `409`. Invalid ticker returns `400`.
+
+**`DELETE /api/watchlist/{ticker}`**: returns `204` on success, `404` if the ticker was not in the watchlist. Removing a ticker that the user has open positions in is allowed — the position remains, but no SSE updates are emitted for that ticker until it is re-added.
 
 ### Chat
 | Method | Path | Description |
 |--------|------|-------------|
 | POST | `/api/chat` | Send a message, receive complete JSON response (message + executed actions) |
 
+**`POST /api/chat` request / response**:
+
+```json
+// Request
+{"message": "Buy 5 AAPL"}
+
+// Response 200
+{
+  "message": "Bought 5 shares of AAPL at $195.42. Your cash balance is now $8257.40.",
+  "actions": {
+    "trades_executed": [{"ticker": "AAPL", "side": "buy", "quantity": 5, "price": 195.42}],
+    "trades_rejected": [],
+    "watchlist_changes": []
+  }
+}
+```
+
 ### System
 | Method | Path | Description |
 |--------|------|-------------|
 | GET | `/api/health` | Health check (for Docker/deployment) |
+
+**`GET /api/health` response**: `{"status": "ok"}` with HTTP 200.
 
 ---
 
@@ -288,7 +422,7 @@ There is an OPENROUTER_API_KEY in the .env file in the project root.
 When the user sends a chat message, the backend:
 
 1. Loads the user's current portfolio context (cash, positions with P&L, watchlist with live prices, total portfolio value)
-2. Loads recent conversation history from the `chat_messages` table
+2. Loads the last **20 messages** from the `chat_messages` table (mixed roles, ordered chronologically — typically ~10 user + ~10 assistant turns). This cap prevents context-window overflow on long sessions and keeps inference cost predictable.
 3. Constructs a prompt with a system message, portfolio context, conversation history, and the user's new message
 4. Calls the LLM via LiteLLM → OpenRouter, requesting structured output, using the cerebras-inference skill
 5. Parses the complete structured JSON response
@@ -458,29 +592,29 @@ Target platforms: AWS App Runner, Render, or any OCI-compatible host.
 
 ### Questions & Clarifications
 
-**1. Lazy DB init: startup or first request?**
-Section 7 says "The backend checks for the SQLite database on startup (or first request)." These are different: if it's first-request, simultaneous cold-start requests could race on schema creation. Recommend changing to startup-only (lifespan event in FastAPI) and removing the ambiguity.
+**1. Lazy DB init: startup or first request?** ✓ RESOLVED → §7 "SQLite Initialization at Startup"
+Decision: startup-only via FastAPI lifespan event. Eliminates race condition on cold-start.
 
-**2. SSE stream and dynamic watchlist changes**
-Section 6 says the SSE stream pushes updates for "all tickers known to the system." What happens when the user adds a ticker mid-session? Does the server automatically include the new ticker in subsequent SSE pushes, or must the client reconnect? This needs a concrete answer so the frontend and backend agents agree on the contract.
+**2. SSE stream and dynamic watchlist changes** ✓ RESOLVED → §6 "SSE Streaming"
+Decision: server watches the watchlist and updates the SSE stream automatically. No client reconnect required.
 
-**3. "Daily change %" with the simulator**
-The watchlist panel is specified to show "daily change %", but the simulator has no concept of yesterday's close — it starts prices fresh each session. Should this column show change-since-session-start instead? Or be omitted in simulator mode and only shown when using the Massive API?
+**3. "Daily change %" with the simulator** ✓ RESOLVED → §7 `daily_closes` table
+Decision: persist a `daily_closes` row per ticker at backend shutdown; next session uses it as "previous close". First-ever session shows `N/A` (frontend) — `daily_change_pct` is `null` in `GET /api/watchlist` response.
 
-**4. Chat history limit**
-Section 9 says the backend loads "recent conversation history" but gives no limit. Without a cap, a long chat session will eventually overflow the LLM's context window. Specify a concrete limit (e.g., last 20 message pairs) so both the backend implementation and tests are consistent.
+**4. Chat history limit** ✓ RESOLVED → §9 step 2
+Decision: 20 most recent messages (mixed roles, not pairs).
 
-**5. Trading a ticker not on the watchlist**
-The trade bar has a free-text ticker field. Can the user buy a ticker that isn't in their watchlist? If yes, should the trade auto-add it to the watchlist? If no, should the UI constrain the ticker field to watchlist members? The plan is silent on this.
+**5. Trading a ticker not on the watchlist** ✓ RESOLVED → §8 `POST /api/portfolio/trade` rules
+Decision: reject with HTTP 400. The user must add the ticker to the watchlist first. No auto-add.
 
-**6. `portfolio_snapshots` total value formula**
-The plan says snapshots record `total_value` every 30 seconds, but never defines the formula. Confirm it is: `cash_balance + Σ(quantity × current_price)` for all open positions. Also clarify: if a position's current price is not in the price cache yet (e.g., fresh restart), should the snapshot be skipped or use avg_cost as a fallback?
+**6. `portfolio_snapshots` total value formula** ✓ RESOLVED → §7 portfolio_snapshots section
+Decision: `cash_balance + Σ(quantity × current_price)`. Fallback when cache empty: use `seed_prices.py`. Initial snapshot triggered on first cache fill (no 30-second empty-chart gap).
 
-**7. Sparkline data lost on SSE reconnect**
-Sparklines are accumulated from SSE events since page load. EventSource auto-reconnects, but the accumulated history is held in frontend memory — a network blip resets it. Is this acceptable, or should sparkline history survive reconnects (e.g., by replaying recent prices from a `/api/prices/history/{ticker}` endpoint)?
+**7. Sparkline data lost on SSE reconnect** ✓ RESOLVED → §6 SSE Streaming (note)
+Decision: accept the loss. Sparkline history is in-memory only; a reconnect resets it. No `/api/prices/history` endpoint added.
 
-**8. `cerebras-inference` skill reference in Section 9**
-Section 9 tells agents to "use the cerebras-inference skill" but this is a Claude Code skill, not Python code. Agents need to know what the resulting Python code should look like (which LiteLLM model string, which headers, structured output approach). Either include a minimal code snippet here or link to a separate `LLM_INTEGRATION.md` reference doc.
+**8. `cerebras-inference` skill reference in Section 9** — OPEN
+Decision deferred until §9 implementation begins. Will specify the concrete LiteLLM model string and structured-output call pattern in a follow-up edit. Confirmed direction: LiteLLM client, free-tier OpenRouter model, `response_format` JSON schema.
 
 ---
 
