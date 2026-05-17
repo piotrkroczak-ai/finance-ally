@@ -12,7 +12,7 @@ This is the capstone project for an agentic AI coding course. It is built entire
 
 ### First Launch
 
-The user runs a single Docker command (or a provided start script). A browser opens to `http://localhost:8000`. No login, no signup. They immediately see:
+The user runs a provided start script. A browser opens to `http://localhost:8000`. No login, no signup. They immediately see:
 
 - A watchlist of 10 default tickers with live-updating prices in a grid
 - $10,000 in virtual cash
@@ -45,11 +45,11 @@ The user runs a single Docker command (or a provided start script). A browser op
 
 ## 3. Architecture Overview
 
-### Single Container, Single Port
+### Single Process, Single Port
 
 ```
 ┌─────────────────────────────────────────────────┐
-│  Docker Container (port 8000)                   │
+│  uvicorn process (port 8000)                    │
 │                                                 │
 │  FastAPI (Python/uv)                            │
 │  ├── /api/*          REST endpoints             │
@@ -57,14 +57,14 @@ The user runs a single Docker command (or a provided start script). A browser op
 │  └── /*              Static file serving         │
 │                      (Next.js export)            │
 │                                                 │
-│  SQLite database (volume-mounted)               │
+│  SQLite database (local file: db/finally.db)    │
 │  Background task: market data polling/sim        │
 └─────────────────────────────────────────────────┘
 ```
 
 - **Frontend**: Next.js with TypeScript, built as a static export (`output: 'export'`), served by FastAPI as static files
 - **Backend**: FastAPI (Python), managed as a `uv` project
-- **Database**: SQLite, single file at `db/finally.db`, volume-mounted for persistence
+- **Database**: SQLite, single file at `db/finally.db`, persisted as a local file
 - **Real-time data**: Server-Sent Events (SSE) — simpler than WebSockets, one-way server→client push, works everywhere
 - **AI integration**: LiteLLM → OpenRouter (Cerebras for fast inference), with structured outputs for trade execution
 - **Market data**: Environment-variable driven — simulator by default, real data via Massive API if key provided
@@ -74,9 +74,9 @@ The user runs a single Docker command (or a provided start script). A browser op
 | Decision | Rationale |
 |---|---|
 | SSE over WebSockets | One-way push is all we need; simpler, no bidirectional complexity, universal browser support |
-| Static Next.js export | Single origin, no CORS issues, one port, one container, simple deployment |
+| Static Next.js export | Single origin, no CORS issues, one port, one process, simple deployment |
 | SQLite over Postgres | No auth = no multi-user = no need for a database server; self-contained, zero config |
-| Single Docker container | Students run one command; no docker-compose for production, no service orchestration |
+| Single start script | One command to build and run; no service orchestration needed for single-user local use |
 | uv for Python | Fast, modern Python project management; reproducible lockfile; what students should learn |
 | Market orders only | Eliminates order book, limit order logic, partial fills — dramatically simpler portfolio math |
 
@@ -88,20 +88,18 @@ The user runs a single Docker command (or a provided start script). A browser op
 finally/
 ├── frontend/                 # Next.js TypeScript project (static export)
 ├── backend/                  # FastAPI uv project (Python)
-│   └── db/                   # Schema definitions, seed data, migration logic
+│   └── schema/               # Schema definitions, seed data, migration logic
 ├── planning/                 # Project-wide documentation for agents
 │   ├── PLAN.md               # This document
 │   └── ...                   # Additional agent reference docs
 ├── scripts/
-│   ├── start_mac.sh          # Launch Docker container (macOS/Linux)
-│   ├── stop_mac.sh           # Stop Docker container (macOS/Linux)
-│   ├── start_windows.ps1     # Launch Docker container (Windows PowerShell)
-│   └── stop_windows.ps1      # Stop Docker container (Windows PowerShell)
-├── test/                     # Playwright E2E tests + docker-compose.test.yml
-├── db/                       # Volume mount target (SQLite file lives here at runtime)
+│   ├── start_mac.sh          # Build frontend + start backend (macOS/Linux)
+│   ├── stop_mac.sh           # Stop backend process (macOS/Linux)
+│   ├── start_windows.ps1     # Build frontend + start backend (Windows PowerShell)
+│   └── stop_windows.ps1      # Stop backend process (Windows PowerShell)
+├── e2e/                      # Playwright E2E tests
+├── db/                       # SQLite file lives here at runtime
 │   └── .gitkeep              # Directory exists in repo; finally.db is gitignored
-├── Dockerfile                # Multi-stage build (Node → Python)
-├── docker-compose.yml        # Optional convenience wrapper
 ├── .env                      # Environment variables (gitignored, .env.example committed)
 └── .gitignore
 ```
@@ -110,11 +108,11 @@ finally/
 
 - **`frontend/`** is a self-contained Next.js project. It knows nothing about Python. It talks to the backend via `/api/*` endpoints and `/api/stream/*` SSE endpoints. Internal structure is up to the Frontend Engineer agent.
 - **`backend/`** is a self-contained uv project with its own `pyproject.toml`. It owns all server logic including database initialization, schema, seed data, API routes, SSE streaming, market data, and LLM integration. Internal structure is up to the Backend/Market Data agents.
-- **`backend/db/`** contains schema SQL definitions and seed logic. The backend lazily initializes the database on first request — creating tables and seeding default data if the SQLite file doesn't exist or is empty.
-- **`db/`** at the top level is the runtime volume mount point. The SQLite file (`db/finally.db`) is created here by the backend and persists across container restarts via Docker volume.
+- **`backend/schema/`** contains schema SQL definitions and seed logic. The backend initializes the database on startup — creating tables and seeding default data if the SQLite file doesn't exist or is empty.
+- **`db/`** at the top level is where the SQLite file (`db/finally.db`) is created by the backend on first run and persists across restarts as a plain local file.
 - **`planning/`** contains project-wide documentation, including this plan. All agents reference files here as the shared contract.
-- **`test/`** contains Playwright E2E tests and supporting infrastructure (e.g., `docker-compose.test.yml`). Unit tests live within `frontend/` and `backend/` respectively, following each framework's conventions.
-- **`scripts/`** contains start/stop scripts that wrap Docker commands.
+- **`e2e/`** contains Playwright E2E tests. Unit tests live within `frontend/` and `backend/` respectively, following each framework's conventions.
+- **`scripts/`** contains start/stop scripts that build the frontend and start/stop the backend process.
 
 ---
 
@@ -137,7 +135,7 @@ LLM_MOCK=false
 - If `MASSIVE_API_KEY` is set and non-empty → backend uses Massive REST API for market data
 - If `MASSIVE_API_KEY` is absent or empty → backend uses the built-in market simulator
 - If `LLM_MOCK=true` → backend returns deterministic mock LLM responses (for E2E tests)
-- The backend reads `.env` from the project root (mounted into the container or read via docker `--env-file`)
+- The backend reads `.env` from the project root at startup
 
 ---
 
@@ -189,26 +187,26 @@ The backend checks for the SQLite database on startup (or first request). If the
 
 - No separate migration step
 - No manual database setup
-- Fresh Docker volumes start with a clean, seeded database automatically
+- A fresh or missing `db/finally.db` file results in a clean, seeded database automatically
 
 ### Schema
 
 All tables include a `user_id` column defaulting to `"default"`. This is hardcoded for now (single-user) but enables future multi-user support without schema migration.
 
-**users_profile** — User state (cash balance)
+**user_profile** — User state (cash balance)
 - `id` TEXT PRIMARY KEY (default: `"default"`)
 - `cash_balance` REAL (default: `10000.0`)
 - `created_at` TEXT (ISO timestamp)
 
 **watchlist** — Tickers the user is watching
-- `id` TEXT PRIMARY KEY (UUID)
+- `id` INTEGER PRIMARY KEY AUTOINCREMENT
 - `user_id` TEXT (default: `"default"`)
 - `ticker` TEXT
 - `added_at` TEXT (ISO timestamp)
 - UNIQUE constraint on `(user_id, ticker)`
 
 **positions** — Current holdings (one row per ticker per user)
-- `id` TEXT PRIMARY KEY (UUID)
+- `id` INTEGER PRIMARY KEY AUTOINCREMENT
 - `user_id` TEXT (default: `"default"`)
 - `ticker` TEXT
 - `quantity` REAL (fractional shares supported)
@@ -217,7 +215,7 @@ All tables include a `user_id` column defaulting to `"default"`. This is hardcod
 - UNIQUE constraint on `(user_id, ticker)`
 
 **trades** — Trade history (append-only log)
-- `id` TEXT PRIMARY KEY (UUID)
+- `id` INTEGER PRIMARY KEY AUTOINCREMENT
 - `user_id` TEXT (default: `"default"`)
 - `ticker` TEXT
 - `side` TEXT (`"buy"` or `"sell"`)
@@ -226,7 +224,7 @@ All tables include a `user_id` column defaulting to `"default"`. This is hardcod
 - `executed_at` TEXT (ISO timestamp)
 
 **portfolio_snapshots** — Portfolio value over time (for P&L chart). Recorded every 30 seconds by a background task, and immediately after each trade execution.
-- `id` TEXT PRIMARY KEY (UUID)
+- `id` INTEGER PRIMARY KEY AUTOINCREMENT
 - `user_id` TEXT (default: `"default"`)
 - `total_value` REAL
 - `recorded_at` TEXT (ISO timestamp)
@@ -241,7 +239,7 @@ All tables include a `user_id` column defaulting to `"default"`. This is hardcod
 
 ### Default Seed Data
 
-- One user profile: `id="default"`, `cash_balance=10000.0`
+- One `user_profile` row: `id="default"`, `cash_balance=10000.0`
 - Ten watchlist entries: AAPL, GOOGL, MSFT, AMZN, TSLA, NVDA, META, JPM, V, NFLX
 
 ---
@@ -371,55 +369,52 @@ The frontend is a single-page application with a dense, terminal-inspired layout
 
 ---
 
-## 11. Docker & Deployment
+## 11. Running Locally & Deployment
 
-### Multi-Stage Dockerfile
+### Local Development (Current)
 
-```
-Stage 1: Node 20 slim
-  - Copy frontend/
-  - npm install && npm run build (produces static export)
+No Docker required. The app runs as two steps — build the frontend once, then start the backend. The backend serves everything on a single port.
 
-Stage 2: Python 3.12 slim
-  - Install uv
-  - Copy backend/
-  - uv sync (install Python dependencies from lockfile)
-  - Copy frontend build output into a static/ directory
-  - Expose port 8000
-  - CMD: uvicorn serving FastAPI app
-```
+**Prerequisites**: Node.js + npm, Python 3.12+, uv
 
-FastAPI serves the static frontend files and all API routes on port 8000.
-
-### Docker Volume
-
-The SQLite database persists via a named Docker volume:
-
+**Step 1 — Build the frontend** (once, or after any frontend change):
 ```bash
-docker run -v finally-data:/app/db -p 8000:8000 --env-file .env finally
+cd frontend
+npm install
+npm run build        # outputs static files to frontend/out/
 ```
 
-The `db/` directory in the project root maps to `/app/db` in the container. The backend writes `finally.db` to this path.
+**Step 2 — Start the backend** (serves API + static frontend):
+```bash
+cd backend
+uv sync              # install Python dependencies
+uv run uvicorn app.main:app --host 0.0.0.0 --port 8000
+```
+
+Open `http://localhost:8000`. FastAPI serves the Next.js static export from the path configured by `STATIC_FILES_DIR` (default: `../frontend/out/`). The SQLite database is created at `db/finally.db` on first run.
 
 ### Start/Stop Scripts
 
-**`scripts/start_mac.sh`** (macOS/Linux):
-- Builds the Docker image if not already built (or if `--build` flag passed)
-- Runs the container with the volume mount, port mapping, and `.env` file
+**`scripts/start_windows.ps1`** (Windows PowerShell):
+- Installs frontend dependencies and builds the static export
+- Starts uvicorn on port 8000
 - Prints the URL to access the app
-- Optionally opens the browser
 
-**`scripts/stop_mac.sh`** (macOS/Linux):
-- Stops and removes the running container
-- Does NOT remove the volume (data persists)
+**`scripts/start_mac.sh`** (macOS/Linux):
+- Same steps as above in bash
+- Optionally opens the browser automatically
 
-**`scripts/start_windows.ps1`** / **`scripts/stop_windows.ps1`**: PowerShell equivalents for Windows.
+**`scripts/stop_windows.ps1`** / **`scripts/stop_mac.sh`**: Stop the uvicorn process. Data in `db/finally.db` is preserved.
 
-All scripts should be idempotent — safe to run multiple times.
+All scripts are idempotent — safe to run multiple times.
 
-### Optional Cloud Deployment
+### Future: Docker Deployment (Linux / Cloud)
 
-The container is designed to deploy to AWS App Runner, Render, or any container platform. A Terraform configuration for App Runner may be provided in a `deploy/` directory as a stretch goal, but is not part of the core build.
+Docker will be introduced when deploying to a Linux server or cloud platform. At that point a `Dockerfile` and `docker-compose.yml` will be added to the project.
+
+The design is already Docker-ready: the only difference between local and Docker runs is the `STATIC_FILES_DIR` env var (`../frontend/out/` locally vs `/app/static/` in the container). No code changes will be required.
+
+Target platforms: AWS App Runner, Render, or any OCI-compatible host.
 
 ---
 
@@ -433,16 +428,16 @@ The container is designed to deploy to AWS App Runner, Render, or any container 
 - LLM: structured output parsing handles all valid schemas, graceful handling of malformed responses, trade validation within chat flow
 - API routes: correct status codes, response shapes, error handling
 
-**Frontend (React Testing Library or similar)**:
+**Frontend (Vitest + React Testing Library)**:
 - Component rendering with mock data
 - Price flash animation triggers correctly on price changes
 - Watchlist CRUD operations
 - Portfolio display calculations
 - Chat message rendering and loading state
 
-### E2E Tests (in `test/`)
+### E2E Tests (in `e2e/`)
 
-**Infrastructure**: A separate `docker-compose.test.yml` in `test/` that spins up the app container plus a Playwright container. This keeps browser dependencies out of the production image.
+**Infrastructure**: Start the app locally using the start scripts, then run Playwright from the `e2e/` directory. A `playwright.config.ts` manages browser setup and the base URL (`http://localhost:8000`).
 
 **Environment**: Tests run with `LLM_MOCK=true` by default for speed and determinism.
 
@@ -489,17 +484,18 @@ Section 9 tells agents to "use the cerebras-inference skill" but this is a Claud
 
 ### Opportunities to Simplify
 
-**A. UUID primary keys on internal tables**
-`watchlist`, `positions`, `portfolio_snapshots`, and `trades` all use UUID primary keys, but none of these IDs are exposed in the API (the watchlist DELETE uses the ticker name; portfolio uses ticker; history is a list). Consider `INTEGER PRIMARY KEY AUTOINCREMENT` for `portfolio_snapshots` and `trades` (purely internal, append-only) to reduce boilerplate. Keep UUIDs only on `users_profile` and `chat_messages` where external references are plausible.
+**A. UUID primary keys on internal tables** ✓ APPLIED
+`watchlist`, `positions`, `portfolio_snapshots`, and `trades` now use `INTEGER PRIMARY KEY AUTOINCREMENT`. UUIDs retained only on `user_profile` and `chat_messages`.
 
-**B. `backend/db/` naming**
-The subdirectory `backend/db/` holds schema SQL, while the top-level `db/` holds the runtime SQLite file. This is a confusing name collision. Renaming `backend/db/` to `backend/schema/` or `backend/sql/` would eliminate the ambiguity.
+**B. Folder naming collisions** ✓ APPLIED
+- `backend/db/` renamed to `backend/schema/` — eliminates collision with top-level `db/` (runtime SQLite)
+- Root `tests/` renamed to `e2e/` — eliminates collision with `backend/tests/` (pytest) and future `frontend/tests/` (Vitest)
 
-**C. Frontend test framework is unspecified**
-"React Testing Library or similar" leaves the choice open, which risks agents making incompatible choices. Next.js projects work well with Vitest + Testing Library — specify this explicitly to ensure consistency.
+**C. Frontend test framework** ✓ APPLIED
+Specified as **Vitest + React Testing Library** in Section 12.
 
-**D. Raw `docker run` in Section 11**
-The Docker Volume section shows a raw `docker run` command, but users are expected to use the start scripts. The raw command may confuse users into running it directly and getting inconsistent container names. Either remove it or clearly label it as "what the script does internally."
+**D. Raw `docker run` in Section 11** ✓ APPLIED
+Section 11 fully rewritten for local development. No raw Docker commands remain.
 
-**E. `users_profile` table name**
-The table is named `users_profile` (plural noun + singular noun). Conventional SQL naming would be `user_profile` (singular) or `users` (plural). This is minor but will appear in every query — pick one convention and apply it consistently across all table names.
+**E. `users_profile` table name** ✓ APPLIED
+Renamed to `user_profile` (singular) throughout.

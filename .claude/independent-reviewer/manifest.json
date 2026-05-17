@@ -1,0 +1,17 @@
+{
+  "name": "independent-reviewer",
+  "version": "1.0.0",
+  "description": "Carry out an independent review of all changes since last commit",
+  "author": "piotr",
+  "commands": [],
+  "hooks": [
+    {
+      "event": "Stop",
+      "command": "codex exec 'Check git status in this project (run: git status --short && git diff HEAD --stat). If any files were actually modified or created in this session, append one concise entry to planning/logs.md. Format strictly as: ## YYYY-MM-DD HH:MM - Brief title\\n\\n- what changed or was implemented\\n- any decision made or open question resolved\\n\\nIf nothing changed (pure conversation, no file edits), do nothing and exit silently. Append only, never overwrite planning/logs.md.'",
+      "shell": "powershell",
+      "timeout": 120,
+      "async": true,
+      "statusMessage": "Updating logs.md..."
+    }
+  ]
+}

@@ -27,7 +27,7 @@
 3. **LLM integration** (§9): chat endpoint, structured output, auto-execution of trades
 4. **Frontend** (§10): Next.js app with watchlist, charts, portfolio heatmap, trade bar, chat panel
 5. **Start scripts**: `scripts/start_windows.ps1` and `scripts/start_mac.sh` (no Docker)
-6. **E2E tests** (§12): Playwright tests in `tests/`
+6. **E2E tests** (§12): Playwright tests in `e2e/`
 
 ## Open decisions / blockers
 
@@ -45,7 +45,7 @@
 | Tech choices | `planning/choice_tech.md` |
 | Change log | `planning/logs.md` |
 | Bug tracker | `planning/bugs.md` |
-| Test results | `tests/tests.md` |
+| Test results | `e2e/tests.md` |
 | Backend entry point | `backend/app/` |
 | Market data module | `backend/app/market/` |
 | DB schema | `backend/db/` |

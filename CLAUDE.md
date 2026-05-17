@@ -17,7 +17,7 @@ All project documentation is in the `planning` directory.
 | `planning/bugs.md` | Bug tracker — symptoms, root causes, resolutions |
 | `planning/choice_tech.md` | Technology choices with pros/cons; update when a choice changes |
 | `planning/MARKET_DATA_SUMMARY.md` | Summary of the completed market data component |
-| `tests/tests.md` | Test results logged per plan section as work progresses |
+| `e2e/tests.md` | Test results logged per plan section as work progresses |
 
 Consult `planning/archive` for full market data implementation details if needed.
 
