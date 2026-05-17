@@ -5,7 +5,7 @@
 
 ---
 
-## Last updated: 2026-05-16
+## Last updated: 2026-05-17
 
 ## What is built and working
 
@@ -22,17 +22,14 @@
 
 ## What is next (priority order)
 
-1. **Update PLAN.md** to reflect no-Docker local development (Section 11 rewrite)
-2. **Backend core** (§7–§8): database init, schema, portfolio API, watchlist API, trade execution
-3. **LLM integration** (§9): chat endpoint, structured output, auto-execution of trades
-4. **Frontend** (§10): Next.js app with watchlist, charts, portfolio heatmap, trade bar, chat panel
-5. **Start scripts**: `scripts/start_windows.ps1` and `scripts/start_mac.sh` (no Docker)
-6. **E2E tests** (§12): Playwright tests in `e2e/`
+1. **Backend core** (§7–§8): database init, schema, portfolio API, watchlist API, trade execution
+2. **LLM integration** (§9): chat endpoint, structured output, auto-execution of trades
+3. **Frontend** (§10): Next.js app with watchlist, charts, portfolio heatmap, trade bar, chat panel
+4. **Start scripts**: `scripts/start_windows.ps1` and `scripts/start_mac.sh` (no Docker)
+5. **E2E tests** (§12): Playwright tests in `e2e/`
 
 ## Open decisions / blockers
 
-- PLAN.md Section 11 needs rewriting for no-Docker local dev (discussed in session, not yet done)
-- Charting library not decided: Lightweight Charts vs Recharts (see `planning/choice_tech.md`)
 - Chat history limit not specified (see PLAN.md §13 review question #4)
 - Daily change % behaviour with simulator undefined (see PLAN.md §13 review question #3)
 - Static files path convention: FastAPI should read `STATIC_FILES_DIR` env var (agreed, not yet implemented)

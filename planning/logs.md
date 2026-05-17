@@ -4,6 +4,23 @@ Chronological record of significant decisions, architectural changes, and milest
 
 ---
 
+## 2026-05-17 — Session: Repo cleanup before sandbox clone
+
+### Claude instructions restructured
+
+- `.claude/instructions.md` nettoyé : suppression des infos personnelles (nom, username Windows, chemins PC), suppression des sections PC-specific
+- `.claude/local-setup.md` créé : contient toute la config PC perso (chemins UV, disques C:/G:) — gitignored
+- `.gitignore` mis à jour : ajout de `.claude/local-setup.md`
+- `CLAUDE.md` mis à jour : ajout Working Session Protocol, Project Structure Reference, référence à `instructions.md`
+- `planning/PLAN.md` mis à jour : session open price dans SSE spec, Lightweight Charts choisi (résolution du blocker), note Docker locale
+
+### Decisions resolved
+
+- **Charting library** : Lightweight Charts (TradingView) — choix acté dans PLAN.md §10
+- **PLAN.md Section 11** : réécriture no-Docker complète (faite en session précédente, confirmée today)
+
+---
+
 ## 2026-05-16 — Session 1: Initial planning review & architecture change
 
 ### Docker removed as primary runtime
